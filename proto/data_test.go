@@ -219,11 +219,11 @@ func TestPrevKey(t *testing.T) {
 }
 
 func TestKeyString(t *testing.T) {
-	if KeyMax.String() != "\xff..." {
+	if KeyMax.String() != "\\xff..." {
 		t.Errorf("expected key max to display a compact version: %s", KeyMax.String())
 	}
-	if str := Key(append([]byte("foo"), KeyMax...)).String(); str != "foo\xff..." {
-		t.Errorf("expected \"foo\xff...\"; got %q", str)
+	if str := Key(append([]byte("foo"), KeyMax...)).String(); str != "foo\\xff..." {
+		t.Errorf("expected \"foo\\xff...\"; got %q", str)
 	}
 }
 
