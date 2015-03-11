@@ -17,6 +17,7 @@
 // Author: Spencer Kimball (spencer.kimball@gmail.com)
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include <google/protobuf/repeated_field.h>
 #include "rocksdb/cache.h"
@@ -42,12 +43,24 @@ struct DBBatch {
   rocksdb::WriteBatch rep;
 };
 
-struct DBEngine {
-  rocksdb::DB* rep;
-};
+struct DBEngine;
 
 struct DBIterator {
+  DBEngine* db;
   rocksdb::Iterator* rep;
+};
+
+const int kIterCacheSize = 8;
+
+struct DBEngine {
+  DBEngine() {
+    for (int i = 0; i < kIterCacheSize; ++i) {
+      cached_iters[i] = NULL;
+    }
+  }
+
+  rocksdb::DB* rep;
+  std::atomic<DBIterator*> cached_iters[kIterCacheSize];
 };
 
 struct DBSnapshot {
@@ -104,6 +117,8 @@ rocksdb::ReadOptions MakeReadOptions(DBSnapshot* snap) {
   rocksdb::ReadOptions options;
   if (snap != NULL) {
     options.snapshot = snap->rep;
+  } else {
+    options.tailing = true;
   }
   return options;
 }
@@ -724,6 +739,13 @@ DBStatus DBDestroy(DBSlice dir) {
 }
 
 void DBClose(DBEngine* db) {
+  for (int i = 0; i < kIterCacheSize; ++i) {
+    DBIterator *iter = db->cached_iters[i].exchange(NULL);
+    if (iter) {
+      delete iter->rep;
+      delete iter;
+    }
+  }
   delete db->rep;
   delete db;
 }
@@ -813,12 +835,39 @@ void DBSnapshotRelease(DBSnapshot* snap) {
 }
 
 DBIterator* DBNewIter(DBEngine* db, DBSnapshot* snap) {
+  if (snap == NULL) {
+    // Use a tailing iterator for non-snapshots and cache the creation
+    // of such iterators. Creation and destruction of iterators is
+    // reasonably expensive.
+    //
+    // TODO(pmattis): Figure out what about creation and destruction
+    // of iterators is expensive. This shouldn't be necessary.
+    for (int i = 0; i < kIterCacheSize; ++i) {
+      DBIterator* iter = db->cached_iters[i].exchange(NULL);
+      if (iter) {
+        return iter;
+      }
+    }
+  }
+
   DBIterator* iter = new DBIterator;
+  iter->db = (snap == NULL) ? db : NULL;
   iter->rep = db->rep->NewIterator(MakeReadOptions(snap));
   return iter;
 }
 
 void DBIterDestroy(DBIterator* iter) {
+  if (iter->db) {
+    // The iterator is cacheable: stuff it into an empty slot in the
+    // cache.
+    DBIterator* expected = NULL;
+    for (int i = 0; i < kIterCacheSize; ++i) {
+      if (iter->db->cached_iters[i].compare_exchange_weak(expected, iter)) {
+        return;
+      }
+    }
+  }
+
   delete iter->rep;
   delete iter;
 }
